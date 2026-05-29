@@ -47,6 +47,7 @@ function isPublicPath(relativePath) {
   return (
     relativePath === "index.html" ||
     relativePath === "styles.css" ||
+    relativePath === "favicon.ico" ||
     relativePath === "robots.txt" ||
     relativePath === "sitemap.xml" ||
     relativePath.startsWith(`assets${path.sep}`)
