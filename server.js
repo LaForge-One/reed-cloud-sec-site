@@ -35,6 +35,8 @@ const contentTypes = {
   ".jpeg": "image/jpeg",
   ".webp": "image/webp",
   ".ico": "image/x-icon",
+  ".txt": "text/plain; charset=utf-8",
+  ".xml": "application/xml; charset=utf-8",
 };
 
 function withSecurityHeaders(headers = {}) {
@@ -45,6 +47,8 @@ function isPublicPath(relativePath) {
   return (
     relativePath === "index.html" ||
     relativePath === "styles.css" ||
+    relativePath === "robots.txt" ||
+    relativePath === "sitemap.xml" ||
     relativePath.startsWith(`assets${path.sep}`)
   );
 }

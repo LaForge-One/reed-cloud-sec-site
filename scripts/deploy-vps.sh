@@ -11,6 +11,8 @@ mkdir -p "$PUBLIC_DIR/assets"
 
 install -m 0644 index.html "$PUBLIC_DIR/index.html"
 install -m 0644 styles.css "$PUBLIC_DIR/styles.css"
+install -m 0644 robots.txt "$PUBLIC_DIR/robots.txt"
+install -m 0644 sitemap.xml "$PUBLIC_DIR/sitemap.xml"
 rsync -a --delete assets/ "$PUBLIC_DIR/assets/"
 
 if command -v systemctl >/dev/null 2>&1; then

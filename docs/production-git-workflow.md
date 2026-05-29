@@ -67,6 +67,14 @@ bash scripts/deploy-vps.sh
 
 The `npm run check` command validates the Node server used by the VPS. The Cloudflare Pages Function under `functions/` uses Cloudflare-specific imports and is not executed by the VPS runtime.
 
+The Nginx custom include for Webuzo lives at:
+
+```text
+/var/webuzo-data/nginx/custom/domains/reedcloudsec.com.conf
+```
+
+A repo copy is maintained at `deploy/nginx/reedcloudsec.com.conf`. Keep it aligned when static public routes change.
+
 ## GitHub Actions Deployment
 
 The `Deploy VPS` workflow is manual by default. Run it from the GitHub Actions tab after the VPS deploy key and repository secrets are configured. This avoids failed automatic deploys while the server-side access controls are still being prepared.
