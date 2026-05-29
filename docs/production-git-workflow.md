@@ -68,7 +68,7 @@ bash scripts/deploy-vps.sh
 
 ## GitHub Actions Deployment
 
-The `Deploy VPS` workflow can deploy automatically from `main` or manually from the GitHub Actions tab.
+The `Deploy VPS` workflow is manual by default. Run it from the GitHub Actions tab after the VPS deploy key and repository secrets are configured. This avoids failed automatic deploys while the server-side access controls are still being prepared.
 
 Required GitHub repository secrets:
 
