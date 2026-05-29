@@ -633,7 +633,7 @@ h2 {
   display: grid;
   grid-template-columns: minmax(260px, 1fr) auto;
   gap: 24px;
-  align-items: center;
+  align-items: start;
   padding: 28px clamp(20px, 5vw, 72px);
   border-top: 1px solid var(--line);
   background:
@@ -641,36 +641,7 @@ h2 {
     #070a0f;
 }
 
-.footer-brand {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  min-width: 0;
-}
-
-.footer-mark {
-  display: grid;
-  flex: 0 0 auto;
-  place-items: center;
-  width: 44px;
-  height: 44px;
-  border: 1px solid rgba(85, 230, 255, 0.36);
-  background: rgba(7, 10, 15, 0.8);
-}
-
-.footer-mark img {
-  display: block;
-  width: 74%;
-  height: 74%;
-  object-fit: contain;
-}
-
-.footer-brand strong {
-  display: block;
-  margin-bottom: 4px;
-}
-
-.footer-brand p,
+.footer-heading,
 .footer-meta {
   margin: 0;
   color: var(--muted);
@@ -678,27 +649,73 @@ h2 {
   line-height: 1.5;
 }
 
+.footer-heading {
+  display: block;
+  margin-bottom: 12px;
+  color: #eaf4ff;
+  font-size: 0.78rem;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.footer-sitemap,
+.footer-engagement {
+  min-width: 0;
+}
+
 .footer-links,
 .footer-meta {
   display: flex;
   flex-wrap: wrap;
-  justify-content: flex-end;
   gap: 12px 20px;
 }
 
 .footer-links {
+  justify-content: flex-start;
   color: #c7d3df;
   font-size: 0.86rem;
   font-weight: 850;
 }
 
+.footer-engagement {
+  justify-self: end;
+}
+
+.social-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 40px;
+  padding: 9px 12px;
+  border: 1px solid rgba(85, 230, 255, 0.28);
+  background: rgba(255, 255, 255, 0.03);
+  color: #eaf4ff;
+  font-size: 0.86rem;
+  font-weight: 850;
+}
+
+.social-link svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
 .footer-links a:hover,
-.footer-links a:focus-visible {
+.footer-links a:focus-visible,
+.social-link:hover,
+.social-link:focus-visible {
   color: var(--cyan);
+  border-color: rgba(85, 230, 255, 0.54);
 }
 
 .footer-meta {
   grid-column: 1 / -1;
+  justify-content: space-between;
   padding-top: 18px;
   border-top: 1px solid rgba(178, 205, 225, 0.1);
 }
