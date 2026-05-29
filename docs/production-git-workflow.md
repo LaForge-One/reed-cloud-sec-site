@@ -65,6 +65,8 @@ npm run check
 bash scripts/deploy-vps.sh
 ```
 
+The `npm run check` command validates the Node server used by the VPS. The Cloudflare Pages Function under `functions/` uses Cloudflare-specific imports and is not executed by the VPS runtime.
+
 ## GitHub Actions Deployment
 
 The `Deploy VPS` workflow is manual by default. Run it from the GitHub Actions tab after the VPS deploy key and repository secrets are configured. This avoids failed automatic deploys while the server-side access controls are still being prepared.
