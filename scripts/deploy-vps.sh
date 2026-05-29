@@ -24,4 +24,16 @@ if command -v systemctl >/dev/null 2>&1; then
 fi
 
 curl -fsS -I https://reedcloudsec.com/index.html >/dev/null
-curl -fsS -o /dev/null -w "Inquiry route HTTP %{http_code}\n" https://reedcloudsec.com/api/inquiry
+
+for attempt in {1..10}; do
+  inquiry_code="$(curl -sS -o /dev/null -w "%{http_code}" https://reedcloudsec.com/api/inquiry || true)"
+  if [[ "$inquiry_code" == "302" ]]; then
+    echo "Inquiry route HTTP $inquiry_code"
+    exit 0
+  fi
+  echo "Waiting for inquiry route, got HTTP $inquiry_code"
+  sleep 2
+done
+
+echo "Inquiry route did not become healthy after restart." >&2
+exit 1
