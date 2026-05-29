@@ -33,9 +33,9 @@ git branch -M main
 git push -u origin main
 ```
 
-## VPS Clone Location
+## VPS Application Location
 
-The production repository should be cloned outside the public web root:
+The production application files should live outside the public web root:
 
 ```text
 /home/marsel/private app/reed-cloud-sec
@@ -57,11 +57,10 @@ The production SMTP token belongs only in:
 
 ## Manual Deploy
 
-After pushing to GitHub, deploy manually on the VPS:
+After pushing to GitHub, deploy manually on the VPS if you are not using GitHub Actions:
 
 ```bash
 cd "/home/marsel/private app/reed-cloud-sec"
-git pull --ff-only
 npm run check
 bash scripts/deploy-vps.sh
 ```
@@ -69,6 +68,8 @@ bash scripts/deploy-vps.sh
 ## GitHub Actions Deployment
 
 The `Deploy VPS` workflow is manual by default. Run it from the GitHub Actions tab after the VPS deploy key and repository secrets are configured. This avoids failed automatic deploys while the server-side access controls are still being prepared.
+
+The workflow deploys by copying the GitHub Actions checkout to the VPS over SSH with `rsync`, then running the local deploy script. This avoids storing GitHub repository credentials on the VPS.
 
 Required GitHub repository secrets:
 

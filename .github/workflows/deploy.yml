@@ -34,5 +34,12 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
           set -euo pipefail
+          rsync -az --delete \
+            --exclude '.git/' \
+            --exclude '.env' \
+            --exclude '.env.*' \
+            --exclude 'outbox/' \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            ./ "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/"
           ssh -i ~/.ssh/deploy_key "$VPS_USER@$VPS_HOST" \
-            "cd \"$DEPLOY_PATH\" && git pull --ff-only && npm run check && bash scripts/deploy-vps.sh"
+            "cd \"$DEPLOY_PATH\" && npm run check && bash scripts/deploy-vps.sh"
