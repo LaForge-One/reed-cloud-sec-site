@@ -1,0 +1,9 @@
+name = "reed-technology-group"
+compatibility_date = "2026-05-24"
+pages_build_output_dir = "."
+
+[vars]
+SMTP_HOST = "smtp.protonmail.ch"
+SMTP_PORT = "587"
+SMTP_USER = "marsel@reedcloudsec.com"
+EMAIL_FROM = "marsel@reedcloudsec.com"

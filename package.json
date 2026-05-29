@@ -1,0 +1,13 @@
+{
+  "name": "reed-cloud-sec-site",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Reed Technology Group landing page and inquiry API.",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js && node --check functions/api/inquiry.js"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}

@@ -1,0 +1,554 @@
+const http = require("node:http");
+const fs = require("node:fs/promises");
+const path = require("node:path");
+const net = require("node:net");
+const tls = require("node:tls");
+const { StringDecoder } = require("node:string_decoder");
+
+const root = __dirname;
+const port = Number(process.env.PORT || 4180);
+const host = process.env.HOST || "0.0.0.0";
+const emailTo = "marsel@reedcloudsec.com";
+const emailFrom = process.env.EMAIL_FROM || emailTo;
+const maxBodyBytes = 100_000;
+const rateLimitWindowMs = Number(process.env.RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000);
+const rateLimitMax = Number(process.env.RATE_LIMIT_MAX || 5);
+const rateLimitStore = new Map();
+const requireSmtp = process.env.REQUIRE_SMTP === "true" || process.env.NODE_ENV === "production";
+
+const securityHeaders = {
+  "Content-Security-Policy":
+    "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests",
+  "Referrer-Policy": "strict-origin-when-cross-origin",
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+};
+
+const contentTypes = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".svg": "image/svg+xml; charset=utf-8",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".ico": "image/x-icon",
+};
+
+function withSecurityHeaders(headers = {}) {
+  return { ...securityHeaders, ...headers };
+}
+
+function isPublicPath(relativePath) {
+  return (
+    relativePath === "index.html" ||
+    relativePath === "styles.css" ||
+    relativePath.startsWith(`assets${path.sep}`)
+  );
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function parseForm(body) {
+  const params = new URLSearchParams(body);
+  return {
+    name: (params.get("name") || "").trim(),
+    email: (params.get("email") || "").trim(),
+    company: (params.get("company") || "").trim(),
+    title: (params.get("title") || "").trim(),
+    inquiryType: (params.get("inquiryType") || "").trim(),
+    message: (params.get("message") || "").trim(),
+    website: (params.get("website") || "").trim(),
+  };
+}
+
+function validateInquiry(inquiry) {
+  if (inquiry.website) {
+    return "Unable to process inquiry.";
+  }
+
+  if (!inquiry.name || !inquiry.email || !inquiry.message) {
+    return "Name, email, and project notes are required.";
+  }
+
+  if (inquiry.name.length > 120) return "Name is too long.";
+  if (inquiry.email.length > 254) return "Email is too long.";
+  if (inquiry.company.length > 160) return "Company is too long.";
+  if (inquiry.title.length > 160) return "Title is too long.";
+  if (inquiry.inquiryType.length > 120) return "Service need is too long.";
+  if (inquiry.message.length > 5000) return "Project notes are too long.";
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(inquiry.email)) {
+    return "Please enter a valid email address.";
+  }
+
+  return "";
+}
+
+function clientIp(req) {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.trim()) {
+    return forwarded.split(",")[0].trim();
+  }
+  return req.socket.remoteAddress || "unknown";
+}
+
+function rateLimitExceeded(req) {
+  const now = Date.now();
+  const ip = clientIp(req);
+  const record = rateLimitStore.get(ip) || { count: 0, resetAt: now + rateLimitWindowMs };
+
+  if (record.resetAt <= now) {
+    record.count = 0;
+    record.resetAt = now + rateLimitWindowMs;
+  }
+
+  record.count += 1;
+  rateLimitStore.set(ip, record);
+
+  for (const [key, value] of rateLimitStore) {
+    if (value.resetAt <= now) rateLimitStore.delete(key);
+  }
+
+  return record.count > rateLimitMax;
+}
+
+function sanitizeHeader(value) {
+  return String(value).replace(/[\r\n]+/g, " ").trim();
+}
+
+function pdfText(value) {
+  return String(value).replace(/[^\t\n\r -~]/g, "?");
+}
+
+function escapePdfText(value) {
+  return pdfText(value).replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
+}
+
+function wrapLine(value, width = 88) {
+  const words = pdfText(value).split(/\s+/);
+  const lines = [];
+  let line = "";
+
+  for (const word of words) {
+    if (!word) continue;
+    if (!line) {
+      line = word;
+    } else if (`${line} ${word}`.length <= width) {
+      line += ` ${word}`;
+    } else {
+      lines.push(line);
+      line = word;
+    }
+  }
+
+  if (line) lines.push(line);
+  return lines.length ? lines : [""];
+}
+
+function createPdf(lines) {
+  const content = [
+    "BT",
+    "/F1 11 Tf",
+    "54 742 Td",
+    "14 TL",
+    ...lines.flatMap((line, index) => [
+      `${index === 0 ? "" : "T* " }(${escapePdfText(line)}) Tj`.trim(),
+    ]),
+    "ET",
+  ].join("\n");
+
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    `<< /Length ${Buffer.byteLength(content, "ascii")} >>\nstream\n${content}\nendstream`,
+  ];
+
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+
+  objects.forEach((object, index) => {
+    offsets.push(Buffer.byteLength(pdf, "ascii"));
+    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+
+  const xrefOffset = Buffer.byteLength(pdf, "ascii");
+  pdf += `xref\n0 ${objects.length + 1}\n`;
+  pdf += "0000000000 65535 f \n";
+  for (let index = 1; index < offsets.length; index += 1) {
+    pdf += `${String(offsets[index]).padStart(10, "0")} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\n`;
+  pdf += `startxref\n${xrefOffset}\n%%EOF\n`;
+
+  return Buffer.from(pdf, "ascii");
+}
+
+function buildInquiryPdf(inquiry, receivedAt) {
+  const company = inquiry.company || "Company not provided";
+  const title = inquiry.title || "Title not provided";
+  const inquiryType = inquiry.inquiryType || "General inquiry";
+  const messageLines = pdfText(inquiry.message)
+    .split(/\r?\n/)
+    .flatMap((line) => wrapLine(line));
+  const lines = [
+    "Reed Technology Group",
+    "Website Inquiry",
+    "",
+    "Summary",
+    `Service Need: ${inquiryType}`,
+    `Company: ${company}`,
+    `Received: ${receivedAt}`,
+    "",
+    "Contact",
+    `Name: ${inquiry.name}`,
+    `Title: ${title}`,
+    `Email: ${inquiry.email}`,
+    "",
+    "Message",
+    ...messageLines,
+    "",
+    `Routed To: ${emailTo}`,
+    "Source: reedcloudsec.com inquiry form",
+  ];
+
+  return createPdf(lines.slice(0, 48));
+}
+
+function foldBase64(value) {
+  return value.match(/.{1,76}/g)?.join("\r\n") || "";
+}
+
+function buildEmail(inquiry) {
+  const company = inquiry.company || "Company not provided";
+  const title = inquiry.title || "Title not provided";
+  const inquiryType = inquiry.inquiryType || "General inquiry";
+  const receivedAt = new Date().toISOString();
+  const subject = sanitizeHeader(`Website inquiry: ${inquiryType} - ${inquiry.name}`);
+  const text = [
+    "NEW WEBSITE INQUIRY",
+    "Reed Technology Group",
+    "==============================",
+    "",
+    "SUMMARY",
+    `Service Need: ${inquiryType}`,
+    `Company: ${company}`,
+    `Received: ${receivedAt}`,
+    "",
+    "CONTACT",
+    `Name: ${inquiry.name}`,
+    `Title: ${title}`,
+    `Email: ${inquiry.email}`,
+    `Reply-To: ${inquiry.email}`,
+    "",
+    "MESSAGE",
+    "------------------------------",
+    inquiry.message,
+    "",
+    "------------------------------",
+    `Routed To: ${emailTo}`,
+    "Source: reedcloudsec.com inquiry form",
+  ].join("\n");
+
+  const pdfBytes = buildInquiryPdf(inquiry, receivedAt);
+  const pdfFilename = `rtg-inquiry-${receivedAt.replace(/[:.]/g, "-")}.pdf`;
+
+  return { subject, text, pdfBytes, pdfFilename };
+}
+
+function smtpConfigured() {
+  return Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
+}
+
+function readSmtp(socket) {
+  return new Promise((resolve, reject) => {
+    let buffer = "";
+    const onData = (chunk) => {
+      buffer += chunk.toString("utf8");
+      const lines = buffer.split(/\r?\n/).filter(Boolean);
+      const last = lines.at(-1) || "";
+      if (/^\d{3} /.test(last)) {
+        socket.off("data", onData);
+        const code = Number(last.slice(0, 3));
+        if (code >= 400) reject(new Error(buffer.trim()));
+        else resolve(buffer);
+      }
+    };
+    socket.on("data", onData);
+    socket.once("error", reject);
+  });
+}
+
+async function smtpCommand(socket, command) {
+  socket.write(`${command}\r\n`);
+  return readSmtp(socket);
+}
+
+async function sendSmtp({ subject, text, replyTo, pdfBytes, pdfFilename }) {
+  const host = process.env.SMTP_HOST;
+  const smtpPort = Number(process.env.SMTP_PORT || 587);
+  const secure = process.env.SMTP_SECURE === "true" || smtpPort === 465;
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+
+  let socket = secure
+    ? tls.connect({ host, port: smtpPort, servername: host })
+    : net.connect({ host, port: smtpPort });
+
+  await new Promise((resolve, reject) => {
+    socket.once(secure ? "secureConnect" : "connect", resolve);
+    socket.once("error", reject);
+  });
+
+  await readSmtp(socket);
+  await smtpCommand(socket, `EHLO ${process.env.SMTP_HELO || "localhost"}`);
+
+  if (!secure && process.env.SMTP_STARTTLS !== "false") {
+    await smtpCommand(socket, "STARTTLS");
+    socket = tls.connect({ socket, servername: host });
+    await new Promise((resolve, reject) => {
+      socket.once("secureConnect", resolve);
+      socket.once("error", reject);
+    });
+    await smtpCommand(socket, `EHLO ${process.env.SMTP_HELO || "localhost"}`);
+  }
+
+  await smtpCommand(socket, "AUTH LOGIN");
+  await smtpCommand(socket, Buffer.from(user).toString("base64"));
+  await smtpCommand(socket, Buffer.from(pass).toString("base64"));
+  await smtpCommand(socket, `MAIL FROM:<${emailFrom}>`);
+  await smtpCommand(socket, `RCPT TO:<${emailTo}>`);
+  await smtpCommand(socket, "DATA");
+
+  const boundary = `rtg-inquiry-${Date.now()}`;
+  const headers = [
+    `From: Reed Technology Group Website <${sanitizeHeader(emailFrom)}>`,
+    `To: ${sanitizeHeader(emailTo)}`,
+    `Reply-To: ${sanitizeHeader(replyTo)}`,
+    `Subject: ${sanitizeHeader(subject)}`,
+    "MIME-Version: 1.0",
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+  ].join("\r\n");
+  const message = [
+    `--${boundary}`,
+    "Content-Type: text/plain; charset=utf-8",
+    "Content-Transfer-Encoding: 8bit",
+    "",
+    text,
+    "",
+    `--${boundary}`,
+    `Content-Type: application/pdf; name="${sanitizeHeader(pdfFilename)}"`,
+    "Content-Transfer-Encoding: base64",
+    `Content-Disposition: attachment; filename="${sanitizeHeader(pdfFilename)}"`,
+    "",
+    foldBase64(pdfBytes.toString("base64")),
+    "",
+    `--${boundary}--`,
+  ].join("\r\n");
+  const safeMessage = message.replace(/^\./gm, "..");
+  socket.write(`${headers}\r\n\r\n${safeMessage}\r\n.\r\n`);
+  await readSmtp(socket);
+  await smtpCommand(socket, "QUIT");
+  socket.end();
+}
+
+async function saveLocalInquiry(inquiry, email) {
+  const outbox = path.join(root, "outbox");
+  await fs.mkdir(outbox, { recursive: true });
+  const stamp = new Date().toISOString().replaceAll(":", "-");
+  const textFile = path.join(outbox, `${stamp}-inquiry.txt`);
+  const pdfFile = path.join(outbox, `${stamp}-inquiry.pdf`);
+  await fs.writeFile(textFile, email.text, "utf8");
+  await fs.writeFile(pdfFile, email.pdfBytes);
+  return { textFile, pdfFile };
+}
+
+function successPage() {
+  const status = "Your inquiry has been received. Reed Technology Group will review it and follow up soon.";
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="refresh" content="5; url=/index.html" />
+    <title>Inquiry Received | Reed Technology Group</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="response-page">
+      <section class="response-card">
+        <p class="section-kicker">Inquiry Received</p>
+        <h1>Thank you.</h1>
+        <p>${escapeHtml(status)}</p>
+        <p class="response-note">You will be redirected back to the home page shortly.</p>
+        <a class="button primary" href="/index.html#inquiry-form">Back to Site</a>
+      </section>
+    </main>
+  </body>
+</html>`;
+}
+
+function errorPage(message) {
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Inquiry Error | Reed Technology Group</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="response-page">
+      <section class="response-card">
+        <p class="section-kicker">Inquiry Error</p>
+        <h1>Please try again.</h1>
+        <p>${escapeHtml(message)}</p>
+        <a class="button primary" href="/index.html#inquiry-form">Back to Form</a>
+      </section>
+    </main>
+  </body>
+</html>`;
+}
+
+async function readRequestBody(req) {
+  return new Promise((resolve, reject) => {
+    const decoder = new StringDecoder("utf8");
+    let body = "";
+    req.on("data", (chunk) => {
+      body += decoder.write(chunk);
+      if (body.length > maxBodyBytes) {
+        reject(new Error("Request body is too large."));
+        req.destroy();
+      }
+    });
+    req.on("end", () => resolve(body + decoder.end()));
+    req.on("error", reject);
+  });
+}
+
+async function handleInquiry(req, res) {
+  try {
+    if (rateLimitExceeded(req)) {
+      res.writeHead(429, withSecurityHeaders({ "Content-Type": "text/html; charset=utf-8" }));
+      res.end(errorPage("Too many inquiries were submitted. Please wait a few minutes and try again."));
+      return;
+    }
+
+    const body = await readRequestBody(req);
+    const inquiry = parseForm(body);
+    const validationError = validateInquiry(inquiry);
+    if (validationError) {
+      res.writeHead(400, withSecurityHeaders({ "Content-Type": "text/html; charset=utf-8" }));
+      res.end(errorPage(validationError));
+      return;
+    }
+
+    const email = buildEmail(inquiry);
+    if (smtpConfigured()) {
+      await sendSmtp({ ...email, replyTo: inquiry.email });
+      console.log(`Inquiry emailed to ${emailTo} with PDF attachment ${email.pdfFilename}`);
+      res.writeHead(200, withSecurityHeaders({ "Content-Type": "text/html; charset=utf-8" }));
+      res.end(successPage());
+      return;
+    }
+
+    if (requireSmtp) {
+      console.error("Inquiry delivery failed: SMTP is required but not configured.");
+      res.writeHead(500, withSecurityHeaders({ "Content-Type": "text/html; charset=utf-8" }));
+      res.end(errorPage("Email service is not configured."));
+      return;
+    }
+
+    const files = await saveLocalInquiry(inquiry, email);
+    console.log(`Inquiry saved to file archive: ${files.textFile}`);
+    console.log(`Inquiry PDF saved to file archive: ${files.pdfFile}`);
+    res.writeHead(200, withSecurityHeaders({ "Content-Type": "text/html; charset=utf-8" }));
+    res.end(successPage());
+  } catch (error) {
+    console.error(error);
+    const status = error.message === "Request body is too large." ? 413 : 500;
+    res.writeHead(status, withSecurityHeaders({ "Content-Type": "text/html; charset=utf-8" }));
+    res.end(errorPage("The inquiry could not be processed."));
+  }
+}
+
+async function serveStatic(req, res) {
+  const requestUrl = new URL(req.url, `http://${req.headers.host}`);
+  let pathname;
+  try {
+    pathname = decodeURIComponent(requestUrl.pathname);
+  } catch {
+    res.writeHead(400, withSecurityHeaders({ "Content-Type": "text/plain; charset=utf-8" }));
+    res.end("Bad request");
+    return;
+  }
+
+  if (pathname === "/") pathname = "index.html";
+  pathname = pathname.replace(/^\/+/, "");
+  const filePath = path.resolve(root, pathname);
+  const relativePath = path.relative(root, filePath);
+
+  if (relativePath.startsWith("..") || path.isAbsolute(relativePath) || !isPublicPath(relativePath)) {
+    res.writeHead(403, withSecurityHeaders({ "Content-Type": "text/plain; charset=utf-8" }));
+    res.end("Forbidden");
+    return;
+  }
+
+  try {
+    const file = await fs.readFile(filePath);
+    const ext = path.extname(filePath);
+    res.writeHead(200, withSecurityHeaders({ "Content-Type": contentTypes[ext] || "application/octet-stream" }));
+    if (req.method === "HEAD") {
+      res.end();
+      return;
+    }
+    res.end(file);
+  } catch {
+    res.writeHead(404, withSecurityHeaders({ "Content-Type": "text/plain; charset=utf-8" }));
+    res.end("Not found");
+  }
+}
+
+const server = http.createServer((req, res) => {
+  const requestUrl = new URL(req.url, `http://${req.headers.host}`);
+
+  if (requestUrl.pathname === "/api/inquiry" && req.method === "POST") {
+    handleInquiry(req, res);
+    return;
+  }
+
+  if (requestUrl.pathname === "/api/inquiry" && req.method === "GET") {
+    res.writeHead(302, withSecurityHeaders({ Location: "/index.html#inquiry-form" }));
+    res.end();
+    return;
+  }
+
+  if (req.method === "GET" || req.method === "HEAD") {
+    serveStatic(req, res);
+    return;
+  }
+
+  res.writeHead(405, withSecurityHeaders({ "Content-Type": "text/plain; charset=utf-8" }));
+  res.end("Method not allowed");
+});
+
+server.listen(port, host, () => {
+  const mode = smtpConfigured()
+    ? "SMTP send mode"
+    : requireSmtp
+      ? "SMTP required but not configured"
+      : "file archive mode";
+  console.log(`Reed Technology Group site running at http://${host}:${port}`);
+  console.log(`Inquiry endpoint: /api/inquiry (${mode})`);
+});

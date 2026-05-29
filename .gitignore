@@ -1,0 +1,14 @@
+outbox/
+node_modules/
+
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.wrangler/
+
+*.log
+*.zip
+.DS_Store
