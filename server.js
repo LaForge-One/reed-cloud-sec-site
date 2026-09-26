@@ -1,14 +1,15 @@
 const http = require("node:http");
 const fs = require("node:fs/promises");
+const { createReadStream } = require("node:fs");
 const path = require("node:path");
-const net = require("node:net");
-const tls = require("node:tls");
 const { StringDecoder } = require("node:string_decoder");
+const dns = require("node:dns/promises");
+const nodemailer = require("nodemailer");
 
 const root = __dirname;
 const port = Number(process.env.PORT || 4180);
 const host = process.env.HOST || "0.0.0.0";
-const emailTo = "marsel@reedcloudsec.com";
+const emailTo = "support@reedcloudsec.com";
 const emailFrom = process.env.EMAIL_FROM || emailTo;
 const maxBodyBytes = 100_000;
 const rateLimitWindowMs = Number(process.env.RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000);
@@ -18,7 +19,7 @@ const requireSmtp = process.env.REQUIRE_SMTP === "true" || process.env.NODE_ENV 
 
 const securityHeaders = {
   "Content-Security-Policy":
-    "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests",
+    "default-src 'self'; img-src 'self' data:; style-src 'self' 'sha256-7y6ZoRyHcqvmhgfO5Vn4aOceGf0bvrYIYH4ngO6dK5E='; script-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests",
   "Referrer-Policy": "strict-origin-when-cross-origin",
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
@@ -37,16 +38,22 @@ const contentTypes = {
   ".ico": "image/x-icon",
   ".txt": "text/plain; charset=utf-8",
   ".xml": "application/xml; charset=utf-8",
+  ".mp4": "video/mp4",
 };
 
 function withSecurityHeaders(headers = {}) {
   return { ...securityHeaders, ...headers };
 }
 
+function cacheControlFor(relativePath) {
+  return relativePath === "index.html" ? "no-cache" : "public, max-age=300, must-revalidate";
+}
+
 function isPublicPath(relativePath) {
   return (
     relativePath === "index.html" ||
     relativePath === "styles.css" ||
+    relativePath === "redesign.css" ||
     relativePath === "favicon.ico" ||
     relativePath === "robots.txt" ||
     relativePath === "sitemap.xml" ||
@@ -73,30 +80,78 @@ function parseForm(body) {
     inquiryType: (params.get("inquiryType") || "").trim(),
     message: (params.get("message") || "").trim(),
     website: (params.get("website") || "").trim(),
+    phone: (params.get("phone") || "").trim(),
   };
 }
 
 function validateInquiry(inquiry) {
-  if (inquiry.website) {
-    return "Unable to process inquiry.";
-  }
-
-  if (!inquiry.name || !inquiry.email || !inquiry.message) {
+  if (inquiry.website || inquiry.phone) return "Unable to process inquiry.";
+  if (!inquiry.name || !inquiry.email || !inquiry.message)
     return "Name, email, and project notes are required.";
-  }
-
   if (inquiry.name.length > 120) return "Name is too long.";
   if (inquiry.email.length > 254) return "Email is too long.";
   if (inquiry.company.length > 160) return "Company is too long.";
   if (inquiry.title.length > 160) return "Title is too long.";
   if (inquiry.inquiryType.length > 120) return "Service need is too long.";
   if (inquiry.message.length > 5000) return "Project notes are too long.";
-
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(inquiry.email)) {
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(inquiry.email))
     return "Please enter a valid email address.";
-  }
-
   return "";
+}
+
+// Flags obvious keyboard-mash / bot-generated text: real English runs roughly
+// 35-45% vowels and rarely stacks more than ~4 consonants in a row. Gibberish
+// like "Egjnjmfnefjwdifj fkmdkdwdwkdwjj" is well outside both, so the
+// thresholds below are set loose enough to leave genuine (even terse or
+// non-native) writing alone while still catching that pattern.
+function looksLikeGibberish(text) {
+  const letters = text.replace(/[^a-zA-Z]/g, "");
+  if (letters.length < 8) return false;
+  const vowels = (letters.match(/[aeiouAEIOU]/g) || []).length;
+  const vowelRatio = vowels / letters.length;
+  const longestConsonantRun = Math.max(
+    0,
+    ...(text.match(/[b-df-hj-np-tv-zB-DF-HJ-NP-TV-Z]+/g) || []).map((run) => run.length)
+  );
+  // Some generators pad in stray vowels specifically to dodge a ratio check,
+  // so also catch the tell their output still can't hide: no real English
+  // word (even compound/technical ones like "internationalization") runs
+  // past 20 letters unbroken. Split on slashes/hyphens too, since real
+  // titles like "Infrastructure/DevOps" use those as word boundaries.
+  const longestWord = Math.max(
+    0,
+    ...text.split(/[\s/&,-]+/).map((word) => word.replace(/[^a-zA-Z]/g, "").length)
+  );
+  return vowelRatio < 0.25 || longestConsonantRun >= 6 || longestWord > 20;
+}
+
+function inquiryLooksLikeSpam(inquiry) {
+  return (
+    looksLikeGibberish(inquiry.name) ||
+    looksLikeGibberish(inquiry.title) ||
+    looksLikeGibberish(inquiry.message)
+  );
+}
+
+// Confirms the email's domain can actually receive mail (has MX records, or
+// at least an A/AAAA as a legacy fallback) before we forward the inquiry.
+// Catches typo'd and fabricated domains without maintaining a blocklist.
+async function emailDomainIsDeliverable(email) {
+  const domain = email.split("@")[1];
+  if (!domain) return false;
+  try {
+    const mx = await dns.resolveMx(domain);
+    if (mx.length > 0) return true;
+  } catch {
+    // fall through to A/AAAA fallback below
+  }
+  try {
+    const a = await dns.resolve4(domain).catch(() => []);
+    const aaaa = await dns.resolve6(domain).catch(() => []);
+    return a.length > 0 || aaaa.length > 0;
+  } catch {
+    return false;
+  }
 }
 
 function clientIp(req) {
@@ -111,19 +166,15 @@ function rateLimitExceeded(req) {
   const now = Date.now();
   const ip = clientIp(req);
   const record = rateLimitStore.get(ip) || { count: 0, resetAt: now + rateLimitWindowMs };
-
   if (record.resetAt <= now) {
     record.count = 0;
     record.resetAt = now + rateLimitWindowMs;
   }
-
   record.count += 1;
   rateLimitStore.set(ip, record);
-
   for (const [key, value] of rateLimitStore) {
     if (value.resetAt <= now) rateLimitStore.delete(key);
   }
-
   return record.count > rateLimitMax;
 }
 
@@ -143,7 +194,6 @@ function wrapLine(value, width = 88) {
   const words = pdfText(value).split(/\s+/);
   const lines = [];
   let line = "";
-
   for (const word of words) {
     if (!word) continue;
     if (!line) {
@@ -155,7 +205,6 @@ function wrapLine(value, width = 88) {
       line = word;
     }
   }
-
   if (line) lines.push(line);
   return lines.length ? lines : [""];
 }
@@ -167,7 +216,7 @@ function createPdf(lines) {
     "54 742 Td",
     "14 TL",
     ...lines.flatMap((line, index) => [
-      `${index === 0 ? "" : "T* " }(${escapePdfText(line)}) Tj`.trim(),
+      `${index === 0 ? "" : "T* "}(${escapePdfText(line)}) Tj`.trim(),
     ]),
     "ET",
   ].join("\n");
@@ -182,7 +231,6 @@ function createPdf(lines) {
 
   let pdf = "%PDF-1.4\n";
   const offsets = [0];
-
   objects.forEach((object, index) => {
     offsets.push(Buffer.byteLength(pdf, "ascii"));
     pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
@@ -227,12 +275,7 @@ function buildInquiryPdf(inquiry, receivedAt) {
     `Routed To: ${emailTo}`,
     "Source: reedcloudsec.com inquiry form",
   ];
-
   return createPdf(lines.slice(0, 48));
-}
-
-function foldBase64(value) {
-  return value.match(/.{1,76}/g)?.join("\r\n") || "";
 }
 
 function buildEmail(inquiry) {
@@ -268,7 +311,6 @@ function buildEmail(inquiry) {
 
   const pdfBytes = buildInquiryPdf(inquiry, receivedAt);
   const pdfFilename = `rtg-inquiry-${receivedAt.replace(/[:.]/g, "-")}.pdf`;
-
   return { subject, text, pdfBytes, pdfFilename };
 }
 
@@ -276,96 +318,40 @@ function smtpConfigured() {
   return Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
 }
 
-function readSmtp(socket) {
-  return new Promise((resolve, reject) => {
-    let buffer = "";
-    const onData = (chunk) => {
-      buffer += chunk.toString("utf8");
-      const lines = buffer.split(/\r?\n/).filter(Boolean);
-      const last = lines.at(-1) || "";
-      if (/^\d{3} /.test(last)) {
-        socket.off("data", onData);
-        const code = Number(last.slice(0, 3));
-        if (code >= 400) reject(new Error(buffer.trim()));
-        else resolve(buffer);
-      }
-    };
-    socket.on("data", onData);
-    socket.once("error", reject);
+function createTransport() {
+  const smtpPort = Number(process.env.SMTP_PORT || 587);
+  const secure = process.env.SMTP_SECURE === "true" || smtpPort === 465;
+  return nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: smtpPort,
+    secure,
+    requireTLS: !secure && process.env.SMTP_STARTTLS !== "false",
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
+    },
+    tls: {
+      rejectUnauthorized: process.env.SMTP_TLS_REJECT_UNAUTHORIZED !== "false",
+    },
   });
-}
-
-async function smtpCommand(socket, command) {
-  socket.write(`${command}\r\n`);
-  return readSmtp(socket);
 }
 
 async function sendSmtp({ subject, text, replyTo, pdfBytes, pdfFilename }) {
-  const host = process.env.SMTP_HOST;
-  const smtpPort = Number(process.env.SMTP_PORT || 587);
-  const secure = process.env.SMTP_SECURE === "true" || smtpPort === 465;
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
-
-  let socket = secure
-    ? tls.connect({ host, port: smtpPort, servername: host })
-    : net.connect({ host, port: smtpPort });
-
-  await new Promise((resolve, reject) => {
-    socket.once(secure ? "secureConnect" : "connect", resolve);
-    socket.once("error", reject);
-  });
-
-  await readSmtp(socket);
-  await smtpCommand(socket, `EHLO ${process.env.SMTP_HELO || "localhost"}`);
-
-  if (!secure && process.env.SMTP_STARTTLS !== "false") {
-    await smtpCommand(socket, "STARTTLS");
-    socket = tls.connect({ socket, servername: host });
-    await new Promise((resolve, reject) => {
-      socket.once("secureConnect", resolve);
-      socket.once("error", reject);
-    });
-    await smtpCommand(socket, `EHLO ${process.env.SMTP_HELO || "localhost"}`);
-  }
-
-  await smtpCommand(socket, "AUTH LOGIN");
-  await smtpCommand(socket, Buffer.from(user).toString("base64"));
-  await smtpCommand(socket, Buffer.from(pass).toString("base64"));
-  await smtpCommand(socket, `MAIL FROM:<${emailFrom}>`);
-  await smtpCommand(socket, `RCPT TO:<${emailTo}>`);
-  await smtpCommand(socket, "DATA");
-
-  const boundary = `rtg-inquiry-${Date.now()}`;
-  const headers = [
-    `From: Reed Technology Group Website <${sanitizeHeader(emailFrom)}>`,
-    `To: ${sanitizeHeader(emailTo)}`,
-    `Reply-To: ${sanitizeHeader(replyTo)}`,
-    `Subject: ${sanitizeHeader(subject)}`,
-    "MIME-Version: 1.0",
-    `Content-Type: multipart/mixed; boundary="${boundary}"`,
-  ].join("\r\n");
-  const message = [
-    `--${boundary}`,
-    "Content-Type: text/plain; charset=utf-8",
-    "Content-Transfer-Encoding: 8bit",
-    "",
+  const transporter = createTransport();
+  await transporter.sendMail({
+    from: `Reed Technology Group Website <${emailFrom}>`,
+    to: emailTo,
+    replyTo,
+    subject,
     text,
-    "",
-    `--${boundary}`,
-    `Content-Type: application/pdf; name="${sanitizeHeader(pdfFilename)}"`,
-    "Content-Transfer-Encoding: base64",
-    `Content-Disposition: attachment; filename="${sanitizeHeader(pdfFilename)}"`,
-    "",
-    foldBase64(pdfBytes.toString("base64")),
-    "",
-    `--${boundary}--`,
-  ].join("\r\n");
-  const safeMessage = message.replace(/^\./gm, "..");
-  socket.write(`${headers}\r\n\r\n${safeMessage}\r\n.\r\n`);
-  await readSmtp(socket);
-  await smtpCommand(socket, "QUIT");
-  socket.end();
+    attachments: [
+      {
+        filename: pdfFilename,
+        content: pdfBytes,
+        contentType: "application/pdf",
+      },
+    ],
+  });
 }
 
 async function saveLocalInquiry(inquiry, email) {
@@ -379,8 +365,28 @@ async function saveLocalInquiry(inquiry, email) {
   return { textFile, pdfFile };
 }
 
+// Flagged submissions never reach support@ or get emailed/PDF'd, but they are
+// still recorded here so a human can spot-check for false positives.
+async function saveSpamLog(inquiry, reason, req) {
+  const spamDir = path.join(root, "spam-log");
+  await fs.mkdir(spamDir, { recursive: true });
+  const stamp = new Date().toISOString().replaceAll(":", "-");
+  const record = {
+    receivedAt: new Date().toISOString(),
+    reason,
+    ip: clientIp(req),
+    inquiry,
+  };
+  await fs.writeFile(
+    path.join(spamDir, `${stamp}-flagged.json`),
+    JSON.stringify(record, null, 2),
+    "utf8"
+  );
+}
+
 function successPage() {
-  const status = "Your inquiry has been received. Reed Technology Group will review it and follow up soon.";
+  const status =
+    "Your inquiry has been received. Reed Technology Group will review it and follow up soon.";
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -459,7 +465,24 @@ async function handleInquiry(req, res) {
       return;
     }
 
+    if (inquiryLooksLikeSpam(inquiry)) {
+      await saveSpamLog(inquiry, "gibberish-text", req);
+      console.warn(`Inquiry flagged as spam (gibberish text) from ${clientIp(req)}`);
+      res.writeHead(200, withSecurityHeaders({ "Content-Type": "text/html; charset=utf-8" }));
+      res.end(successPage());
+      return;
+    }
+
+    if (!(await emailDomainIsDeliverable(inquiry.email))) {
+      await saveSpamLog(inquiry, "email-domain-not-deliverable", req);
+      console.warn(`Inquiry flagged as spam (bad email domain) from ${clientIp(req)}: ${inquiry.email}`);
+      res.writeHead(200, withSecurityHeaders({ "Content-Type": "text/html; charset=utf-8" }));
+      res.end(successPage());
+      return;
+    }
+
     const email = buildEmail(inquiry);
+
     if (smtpConfigured()) {
       await sendSmtp({ ...email, replyTo: inquiry.email });
       console.log(`Inquiry emailed to ${emailTo} with PDF attachment ${email.pdfFilename}`);
@@ -481,7 +504,7 @@ async function handleInquiry(req, res) {
     res.writeHead(200, withSecurityHeaders({ "Content-Type": "text/html; charset=utf-8" }));
     res.end(successPage());
   } catch (error) {
-    console.error(error);
+    console.error("Inquiry handler error:", error);
     const status = error.message === "Request body is too large." ? 413 : 500;
     res.writeHead(status, withSecurityHeaders({ "Content-Type": "text/html; charset=utf-8" }));
     res.end(errorPage("The inquiry could not be processed."));
@@ -504,21 +527,82 @@ async function serveStatic(req, res) {
   const filePath = path.resolve(root, pathname);
   const relativePath = path.relative(root, filePath);
 
-  if (relativePath.startsWith("..") || path.isAbsolute(relativePath) || !isPublicPath(relativePath)) {
+  if (
+    relativePath.startsWith("..") ||
+    path.isAbsolute(relativePath) ||
+    !isPublicPath(relativePath)
+  ) {
     res.writeHead(403, withSecurityHeaders({ "Content-Type": "text/plain; charset=utf-8" }));
     res.end("Forbidden");
     return;
   }
 
+  const ext = path.extname(filePath);
+  const contentType = contentTypes[ext] || "application/octet-stream";
+
   try {
-    const file = await fs.readFile(filePath);
-    const ext = path.extname(filePath);
-    res.writeHead(200, withSecurityHeaders({ "Content-Type": contentTypes[ext] || "application/octet-stream" }));
+    const stat = await fs.stat(filePath);
+    const lastModified = stat.mtime.toUTCString();
+    const cacheHeaders = {
+      "Cache-Control": cacheControlFor(relativePath),
+      "Last-Modified": lastModified,
+    };
+
+    const ifModifiedSince = req.headers["if-modified-since"];
+    if (
+      ifModifiedSince &&
+      Math.floor(new Date(ifModifiedSince).getTime() / 1000) >= Math.floor(stat.mtimeMs / 1000)
+    ) {
+      res.writeHead(304, withSecurityHeaders(cacheHeaders));
+      res.end();
+      return;
+    }
+
+    const range = req.headers.range;
+
+    if (range) {
+      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+      const start = match && match[1] ? Number(match[1]) : 0;
+      const end = match && match[2] ? Number(match[2]) : stat.size - 1;
+
+      if (!match || start > end || end >= stat.size) {
+        res.writeHead(416, withSecurityHeaders({ "Content-Range": `bytes */${stat.size}` }));
+        res.end();
+        return;
+      }
+
+      res.writeHead(
+        206,
+        withSecurityHeaders({
+          ...cacheHeaders,
+          "Content-Type": contentType,
+          "Content-Range": `bytes ${start}-${end}/${stat.size}`,
+          "Accept-Ranges": "bytes",
+          "Content-Length": end - start + 1,
+        }),
+      );
+      if (req.method === "HEAD") {
+        res.end();
+        return;
+      }
+      createReadStream(filePath, { start, end }).pipe(res);
+      return;
+    }
+
+    res.writeHead(
+      200,
+      withSecurityHeaders({
+        ...cacheHeaders,
+        "Content-Type": contentType,
+        "Content-Length": stat.size,
+        "Accept-Ranges": "bytes",
+      }),
+    );
     if (req.method === "HEAD") {
       res.end();
       return;
     }
-    res.end(file);
+    createReadStream(filePath).pipe(res);
   } catch {
     res.writeHead(404, withSecurityHeaders({ "Content-Type": "text/plain; charset=utf-8" }));
     res.end("Not found");
