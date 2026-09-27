@@ -12,3 +12,9 @@ node_modules/
 *.log
 *.zip
 .DS_Store
+
+# Runtime data (contains submitters' emails) and local backups - never commit
+spam-log/
+*.bak
+*.bak.*
+*.bak-*
