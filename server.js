@@ -45,6 +45,13 @@ function withSecurityHeaders(headers = {}) {
   return { ...securityHeaders, ...headers };
 }
 
+// After a submission we 303-redirect (POST/Redirect/GET, so a refresh never re-submits) back to the landing page's contact form.
+// index.html shows a pure-CSS dialog for #inquiry-received / #inquiry-error (the CSP has script-src 'none', so no JS popup).
+function redirectToLanding(res, hash) {
+  res.writeHead(303, withSecurityHeaders({ Location: `/${hash}`, "Cache-Control": "no-store" }));
+  res.end();
+}
+
 function cacheControlFor(relativePath) {
   return relativePath === "index.html" ? "no-cache" : "public, max-age=300, must-revalidate";
 }
@@ -451,8 +458,7 @@ async function readRequestBody(req) {
 async function handleInquiry(req, res) {
   try {
     if (rateLimitExceeded(req)) {
-      res.writeHead(429, withSecurityHeaders({ "Content-Type": "text/html; charset=utf-8" }));
-      res.end(errorPage("Too many inquiries were submitted. Please wait a few minutes and try again."));
+      redirectToLanding(res, "#inquiry-error");
       return;
     }
 
@@ -460,24 +466,21 @@ async function handleInquiry(req, res) {
     const inquiry = parseForm(body);
     const validationError = validateInquiry(inquiry);
     if (validationError) {
-      res.writeHead(400, withSecurityHeaders({ "Content-Type": "text/html; charset=utf-8" }));
-      res.end(errorPage(validationError));
+      redirectToLanding(res, "#inquiry-error");
       return;
     }
 
     if (inquiryLooksLikeSpam(inquiry)) {
       await saveSpamLog(inquiry, "gibberish-text", req);
       console.warn(`Inquiry flagged as spam (gibberish text) from ${clientIp(req)}`);
-      res.writeHead(200, withSecurityHeaders({ "Content-Type": "text/html; charset=utf-8" }));
-      res.end(successPage());
+      redirectToLanding(res, "#inquiry-received");
       return;
     }
 
     if (!(await emailDomainIsDeliverable(inquiry.email))) {
       await saveSpamLog(inquiry, "email-domain-not-deliverable", req);
       console.warn(`Inquiry flagged as spam (bad email domain) from ${clientIp(req)}: ${inquiry.email}`);
-      res.writeHead(200, withSecurityHeaders({ "Content-Type": "text/html; charset=utf-8" }));
-      res.end(successPage());
+      redirectToLanding(res, "#inquiry-received");
       return;
     }
 
@@ -486,28 +489,24 @@ async function handleInquiry(req, res) {
     if (smtpConfigured()) {
       await sendSmtp({ ...email, replyTo: inquiry.email });
       console.log(`Inquiry emailed to ${emailTo} with PDF attachment ${email.pdfFilename}`);
-      res.writeHead(200, withSecurityHeaders({ "Content-Type": "text/html; charset=utf-8" }));
-      res.end(successPage());
+      redirectToLanding(res, "#inquiry-received");
       return;
     }
 
     if (requireSmtp) {
       console.error("Inquiry delivery failed: SMTP is required but not configured.");
-      res.writeHead(500, withSecurityHeaders({ "Content-Type": "text/html; charset=utf-8" }));
-      res.end(errorPage("Email service is not configured."));
+      redirectToLanding(res, "#inquiry-error");
       return;
     }
 
     const files = await saveLocalInquiry(inquiry, email);
     console.log(`Inquiry saved to file archive: ${files.textFile}`);
     console.log(`Inquiry PDF saved to file archive: ${files.pdfFile}`);
-    res.writeHead(200, withSecurityHeaders({ "Content-Type": "text/html; charset=utf-8" }));
-    res.end(successPage());
+    redirectToLanding(res, "#inquiry-received");
   } catch (error) {
     console.error("Inquiry handler error:", error);
     const status = error.message === "Request body is too large." ? 413 : 500;
-    res.writeHead(status, withSecurityHeaders({ "Content-Type": "text/html; charset=utf-8" }));
-    res.end(errorPage("The inquiry could not be processed."));
+    redirectToLanding(res, "#inquiry-error");
   }
 }
 

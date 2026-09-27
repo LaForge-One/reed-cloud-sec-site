@@ -34,7 +34,7 @@
     <link rel="icon" type="image/png" href="/assets/shield_32.png" sizes="32x32" />
     <link rel="icon" type="image/png" href="/assets/shield_16.png" sizes="16x16" />
     <link rel="apple-touch-icon" href="/assets/apple-touch-icon-shield.png" />
-    <link rel="stylesheet" href="redesign.css" />
+    <link rel="stylesheet" href="redesign.css?v=20260927-toast" />
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
@@ -214,6 +214,27 @@
             </div>
           </div>
           <div class="form-card">
+            <span id="inquiry-received" class="toast-anchor"></span>
+            <div class="toast" role="alertdialog" aria-labelledby="ir-title" aria-describedby="ir-desc">
+              <a class="toast-backdrop-link" href="#contact" aria-label="Close"></a>
+              <div class="toast-card">
+                <span class="toast-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>
+                <h2 id="ir-title">Inquiry received</h2>
+                <p id="ir-desc">Thank you. Your inquiry has been received, and Reed Technology Group will follow up within one business day.</p>
+                <a class="btn btn-p" href="#contact">Close</a>
+                <span class="toast-timer" aria-hidden="true"></span>
+              </div>
+            </div>
+            <span id="inquiry-error" class="toast-anchor"></span>
+            <div class="toast toast-error" role="alertdialog" aria-labelledby="ie-title" aria-describedby="ie-desc">
+              <a class="toast-backdrop-link" href="#contact" aria-label="Close"></a>
+              <div class="toast-card">
+                <span class="toast-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5m0 4h.01"/><circle cx="12" cy="12" r="9"/></svg></span>
+                <h2 id="ie-title">We couldn't send your inquiry</h2>
+                <p id="ie-desc">Please try again in a few minutes, or email support@reedcloudsec.com and we'll help directly.</p>
+                <a class="btn btn-p" href="#contact">Close</a>
+              </div>
+            </div>
             <form id="inquiry-form" action="/api/inquiry" method="post">
               <div class="form-row">
                 <div class="form-field">

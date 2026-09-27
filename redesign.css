@@ -127,3 +127,32 @@ a:focus-visible,.btn:focus-visible,button:focus-visible{outline:2px solid var(--
 @media(max-width:560px){.form-row{grid-template-columns:1fr}.footer-inner{grid-template-columns:1fr}}
 
 .raised{position:relative;z-index:1}
+
+/* Inquiry result dialogs - pure CSS because the CSP has script-src 'none'.
+   server.js 303-redirects to /#inquiry-received (auto-hides after 5s) or /#inquiry-error (stays until closed). */
+.form-card{position:relative}
+html:has(.toast-anchor:target){scroll-behavior:auto}  /* jump straight to the form behind the dialog, no long smooth scroll */
+.toast-anchor{position:absolute;top:-96px;left:0;width:1px;height:1px}
+.toast{display:none;position:fixed;inset:0;z-index:1000;place-items:center;padding:20px;
+  background:rgba(2,15,30,.62);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+.toast-anchor:target + .toast{display:grid;animation:toast-fade .25s ease both}
+#inquiry-received:target + .toast{animation:toast-fade .25s ease both,toast-out .5s ease 5s forwards}
+.toast-backdrop-link{position:absolute;inset:0;z-index:0;cursor:default}
+.toast-card{position:relative;z-index:1;width:min(440px,100%);overflow:hidden;text-align:center;padding:30px 28px 28px;
+  border-radius:20px;border:1px solid rgba(120,190,255,.38);
+  background:linear-gradient(180deg,rgba(24,95,165,.6),rgba(4,44,83,.96));box-shadow:0 30px 80px rgba(0,0,0,.55);
+  animation:toast-pop .35s cubic-bezier(.2,.9,.3,1.15) both}
+.toast-icon{display:grid;place-items:center;width:58px;height:58px;margin:0 auto 14px;border-radius:50%;
+  background:rgba(90,169,234,.16);border:1px solid rgba(120,190,255,.45);box-shadow:0 0 34px rgba(90,169,234,.35)}
+.toast-icon svg{width:26px;height:26px;fill:none;stroke:var(--sky);stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}
+.toast-card h2{font-size:1.4rem;margin:0 0 8px;max-width:none}
+.toast-card p{color:var(--muted);font-size:.95rem;margin:0 0 20px}
+.toast-timer{position:absolute;left:0;bottom:0;width:100%;height:3px;transform-origin:left;
+  background:linear-gradient(90deg,var(--sky),var(--navy-mid));animation:toast-shrink 5s linear forwards}
+.toast-error .toast-icon{background:rgba(255,120,120,.12);border-color:rgba(255,140,140,.42);box-shadow:0 0 34px rgba(255,120,120,.25)}
+.toast-error .toast-icon svg{stroke:#ff9b9b}
+@keyframes toast-fade{from{opacity:0}to{opacity:1}}
+@keyframes toast-out{to{opacity:0;visibility:hidden;pointer-events:none}}
+@keyframes toast-pop{from{opacity:0;transform:translateY(14px) scale(.96)}to{opacity:1;transform:none}}
+@keyframes toast-shrink{from{transform:scaleX(1)}to{transform:scaleX(0)}}
+@media (prefers-reduced-motion:reduce){.toast-card{animation:none}.toast-timer{display:none}}
